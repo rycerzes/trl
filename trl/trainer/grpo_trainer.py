@@ -1435,6 +1435,10 @@ class GRPOTrainer(_BaseTrainer):
             multimodal_fields = {}
         return prompt_ids, images, multimodal_fields
 
+    def _prepare_generation_inputs(self, generation_inputs: dict[str, torch.Tensor | Any]) -> dict[str, torch.Tensor | Any]:
+        # Route to the base Trainer implementation to avoid invoking this class's generation-aware _prepare_inputs.
+        return super()._prepare_inputs(generation_inputs)
+
     def _generate_single_turn(self, prompt_ids, images, multimodal_fields):
         device = self.accelerator.device
         mode = "train" if self.model.training else "eval"
@@ -1478,7 +1482,7 @@ class GRPOTrainer(_BaseTrainer):
                 is_fsdp_enabled=self.is_fsdp_enabled,
                 eos_token_id=self.eos_token_id,
                 device=device,
-                prepare_inputs=super()._prepare_inputs,
+                prepare_inputs=self._prepare_generation_inputs,
                 profiler_owner=self,
             )
             logprobs = None  # not used in this case
