@@ -41,7 +41,13 @@ class TestRLOOGenerationBackendDispatch:
     def _make_trainer(self):
         trainer = object.__new__(RLOOTrainer)
         trainer.accelerator = SimpleNamespace(device=torch.device("cpu"), is_main_process=True)
-        trainer.args = SimpleNamespace(report_to=[], ds3_gather_for_generation=False, bf16=False, fp16=False)
+        trainer.args = SimpleNamespace(
+            report_to=[],
+            ds3_gather_for_generation=False,
+            bf16=False,
+            fp16=False,
+            cast_lm_head_to_fp32=False,
+        )
         trainer.model = SimpleNamespace(training=True)
         trainer.state = SimpleNamespace(global_step=2)
         trainer._last_loaded_step = 1

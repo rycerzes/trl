@@ -152,6 +152,8 @@ def _generate_with_transformers_paged(
             unwrapped_model.to(torch.bfloat16)
         elif args.fp16:
             unwrapped_model.to(torch.float16)
+        if args.cast_lm_head_to_fp32:
+            unwrapped_model.lm_head.to(torch.float32)
         with torch.inference_mode():
             # Continuous batching API expects 'inputs' arg only
             all_outputs = unwrapped_model.generate_batch(prompt_ids, generation_config=generation_config, progress_bar=False)

@@ -41,6 +41,11 @@ class RLOOConfig(_BaseConfig):
         disable_dropout (`bool`, *optional*, defaults to `False`):
             Whether to disable dropout in the model. This is useful for training with a reference model, as it prevents
             the model from generating different logprobs for the same input.
+        cast_lm_head_to_fp32 (`bool`, *optional*, defaults to `False`):
+            Whether to cast the language modeling head of the policy and reference models to float32. As recommended by
+            the [ScaleRL](https://huggingface.co/papers/2510.13786) recipe. This flag is only supported when the model
+            has untied word embedding and language modeling head layers i.e. `tie_word_embeddings` in the model config
+            is False.
 
         > Parameters that control the data preprocessing
 
@@ -235,6 +240,15 @@ class RLOOConfig(_BaseConfig):
         metadata={
             "help": "Whether to disable dropout in the model. This is useful for training with a reference model, as "
             "it prevents the model from generating different logprobs for the same input."
+        },
+    )
+    cast_lm_head_to_fp32: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to cast the language modeling head of the policy and reference, models to float32."
+            "As recommended by the [ScaleRL](https://huggingface.co/papers/2510.13786) recipe. This flag is only "
+            "supported when the model has untied word embedding and language modeling head layers i.e. "
+            "`tie_word_embeddings` in the model config is False."
         },
     )
 
