@@ -583,6 +583,34 @@ class RLOOTrainer(_BaseTrainer):
             if self.ref_model is not None:
                 disable_dropout_in_model(self.ref_model)
 
+        # Cast LM Head To FP32
+        if args.cast_lm_head_to_fp32:
+
+            def _cast_lm_head_to_fp32(target_model: PreTrainedModel):
+                """Cast lm_head to fp32 while preserving embedding output dtype if tied."""
+
+                def cast_inputs_to_fp32(module, inputs):
+                    # Preserve other positional args and kwargs untouched
+                    if not inputs:
+                        return inputs
+                    return (inputs[0].to(torch.float32),) + inputs[1:]
+
+                original_dtype_local = target_model.lm_head.weight.dtype
+                target_model.lm_head = target_model.lm_head.float()
+                target_model.lm_head.register_forward_pre_hook(cast_inputs_to_fp32)
+
+                if target_model.config.tie_word_embeddings:
+
+                    def cast_outputs_to_original_dtype(module, args, output):
+                        return output.to(original_dtype_local)
+
+                    # Only cast activations; weights are now fp32 (intentional for numerical stability of logits)
+                    target_model.model.embed_tokens.register_forward_hook(cast_outputs_to_original_dtype)
+
+            _cast_lm_head_to_fp32(model)
+            if self.ref_model is not None:
+                _cast_lm_head_to_fp32(self.ref_model)
+
         # Initialize the metrics
         self._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
         self._total_train_tokens = 0
