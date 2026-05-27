@@ -13,17 +13,24 @@
 # limitations under the License.
 
 """
-GRPOTrainer baseline benchmark (sync, vLLM colocate mode).
+GRPOTrainer baseline benchmark (sync, vLLM server mode).
 
-No separate vLLM server needed — vLLM runs colocated on the same GPU.
+Uses 2 GPUs:
+  - GPU 0: Trainer (training model + optimizer)
+  - GPU 1: vLLM server (generation via TRL vllm-serve)
 
-Run:
-    CUDA_VISIBLE_DEVICES=0,1 python benchmarks/scripts/grpo_baseline.py
+The TRL vLLM server must be launched separately before running this script:
 
-Note: GRPOTrainer's server-mode weight sync uses /init_communicator/ which was removed in
-vLLM 0.21. Colocate mode avoids this API incompatibility while still using vLLM for
-generation. The AsyncGRPOTrainer uses the newer /init_weight_transfer_engine endpoint
-which works with vLLM 0.21.
+    CUDA_VISIBLE_DEVICES=1 /root/trl/.venv/bin/trl vllm-serve \
+        --model Qwen/Qwen3-4B --dtype bfloat16 --max_model_len 768 \
+        --gpu_memory_utilization 0.90 --enforce_eager --port 8000
+
+Run trainer:
+    CUDA_VISIBLE_DEVICES=0 python benchmarks/scripts/grpo_baseline.py
+
+Weight sync uses TRL's own PyNcclCommunicator-based /init_communicator/ and
+/update_named_param/ endpoints (implemented in trl vllm-serve, independent of
+vLLM's newer /init_weight_transfer_engine API).
 """
 
 import json
@@ -62,12 +69,15 @@ def main():
 
     config = GRPOConfig(
         output_dir=OUTPUT_DIR,
-        # vLLM colocate mode (avoids 0.21 /init_communicator API break)
+        # Model init kwargs (exercises model_init_kwargs pass-through)
+        model_init_kwargs={
+            "dtype": "bfloat16",
+            "attn_implementation": "flash_attention_2",
+        },
+        # vLLM server mode — generation on separate GPU via TRL vllm-serve
         use_vllm=True,
-        vllm_mode="colocate",
-        vllm_gpu_memory_utilization=0.45,
-        vllm_max_model_length=768,
-        vllm_enable_sleep_mode=True,
+        vllm_mode="server",
+        vllm_server_base_url="http://localhost:8000",
         # Generation (non-default sampling to exercise plumbing)
         max_completion_length=384,
         num_generations=8,
@@ -120,7 +130,7 @@ def main():
             "max_completion_length": config.max_completion_length,
             "num_generations": config.num_generations,
             "peft_r": 16,
-            "variant": "grpo_baseline",
+            "variant": "grpo_baseline_server",
         },
     }
     results_path = Path(OUTPUT_DIR) / "timing.json"

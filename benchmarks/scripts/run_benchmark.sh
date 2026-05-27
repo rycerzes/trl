@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # AsyncGRPO vs GRPO benchmark orchestrator
-# - GRPO baseline: colocate mode (no separate server needed)
-# - AsyncGRPO: server mode (vLLM launched on GPU 1, trainer on GPU 0)
+# Both configurations use 2 GPUs:
+# - GRPO baseline: server mode (TRL vllm-serve on GPU 1, trainer on GPU 0)
+# - AsyncGRPO:     server mode (vLLM on GPU 0, trainer on GPU 1) with NCCL weight sync
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -12,37 +13,51 @@ VENV="/root/trl/.venv/bin"
 NUM_REPEATS="${NUM_REPEATS:-1}"
 
 # --- Helpers ---
-wait_for_vllm() {
-    echo "[vllm] Waiting for server on port ${VLLM_PORT}..."
-    for i in $(seq 1 120); do
-        if curl -sf "http://localhost:${VLLM_PORT}/health" > /dev/null 2>&1; then
-            echo "[vllm] Server ready (took $((i * 2))s)"
+wait_for_server() {
+    local health_url="$1"
+    local timeout="${2:-240}"
+    echo "[server] Waiting for server at ${health_url}..."
+    for i in $(seq 1 $((timeout / 2))); do
+        if curl -sf "${health_url}" > /dev/null 2>&1; then
+            echo "[server] Ready (took $((i * 2))s)"
             return 0
         fi
         sleep 2
     done
-    echo "[vllm] ERROR: Server did not start within 240s"
-    echo "[vllm] Last 20 lines of server log:"
-    tail -20 "${RESULTS_DIR}/vllm_server.log" 2>/dev/null || true
+    echo "[server] ERROR: Server did not start within ${timeout}s"
     return 1
 }
 
-kill_vllm() {
-    if pgrep -f "vllm.entrypoints" > /dev/null 2>&1; then
-        echo "[vllm] Stopping server..."
-        pkill -f "vllm.entrypoints" 2>/dev/null || true
-        sleep 5
-    fi
+kill_server() {
+    # Kill any vllm or trl vllm-serve processes
+    pkill -f "vllm.entrypoints" 2>/dev/null || true
+    pkill -f "trl vllm-serve" 2>/dev/null || true
+    pkill -f "vllm_serve" 2>/dev/null || true
+    sleep 3
 }
 
-launch_vllm() {
-    kill_vllm
-    # NOTE: Do NOT use CUDA_VISIBLE_DEVICES to isolate GPUs for NCCL weight transfer.
-    # Both processes must see all GPUs so NCCL can resolve the physical topology.
-    # vLLM defaults to GPU 0; the trainer uses cuda:1 via device index.
-    # NCCL_P2P_DISABLE=1 + NCCL_SHM_DISABLE=1 required on PCIe-only hardware (no NVLink).
-    # --gpu-memory-utilization 0.45 leaves room for NCCL weight transfer buffers (~1GB).
-    echo "[vllm] Launching server on GPU 0 (model: ${MODEL})..."
+launch_trl_vllm_serve() {
+    # TRL's own vllm-serve provides /generate/, /init_communicator/, /update_named_param/
+    # Used by the GRPO baseline in server mode
+    kill_server
+    echo "[server] Launching TRL vllm-serve on GPU 1 (model: ${MODEL})..."
+    CUDA_VISIBLE_DEVICES=1 "${VENV}/trl" vllm-serve \
+        --model "${MODEL}" \
+        --dtype bfloat16 \
+        --max_model_len 768 \
+        --gpu_memory_utilization 0.90 \
+        --enforce_eager \
+        --port "${VLLM_PORT}" \
+        > "${RESULTS_DIR}/trl_vllm_serve.log" 2>&1 &
+    wait_for_server "http://localhost:${VLLM_PORT}/health/"
+}
+
+launch_vllm_server() {
+    # Standard vLLM serve with RLHF weight transfer for AsyncGRPO
+    # NOTE: Do NOT use CUDA_VISIBLE_DEVICES — vLLM must see all GPUs for NCCL topology.
+    # vLLM defaults to GPU 0 with TP=1.
+    kill_server
+    echo "[server] Launching vLLM server on GPU 0 (model: ${MODEL})..."
     NCCL_P2P_DISABLE=1 NCCL_SHM_DISABLE=1 VLLM_SERVER_DEV_MODE=1 \
         "${VENV}/python" -m vllm.entrypoints.openai.api_server \
         --model "${MODEL}" \
@@ -54,11 +69,11 @@ launch_vllm() {
         --port "${VLLM_PORT}" \
         --enforce-eager \
         > "${RESULTS_DIR}/vllm_server.log" 2>&1 &
-    wait_for_vllm
+    wait_for_server "http://localhost:${VLLM_PORT}/health"
 }
 
 # Trap to ensure cleanup on exit
-trap kill_vllm EXIT
+trap kill_server EXIT
 
 # --- Pre-flight checks ---
 echo "============================================"
@@ -79,8 +94,8 @@ echo ""
 echo "Config:"
 echo "  Model:       ${MODEL}"
 echo "  Repeats:     ${NUM_REPEATS}"
-echo "  GRPO:        colocate mode (both GPUs)"
-echo "  AsyncGRPO:   server mode (GPU 0 trainer, GPU 1 vLLM)"
+echo "  GRPO:        server mode (GPU 0 trainer, GPU 1 TRL vllm-serve)"
+echo "  AsyncGRPO:   server mode (GPU 1 trainer, GPU 0 vLLM + NCCL weight sync)"
 echo ""
 
 # --- Create output dirs ---
@@ -93,22 +108,21 @@ for run in $(seq 1 "${NUM_REPEATS}"); do
     echo "========== REPEAT ${run}/${NUM_REPEATS} =========="
     echo ""
 
-    # --- Run 1: GRPO baseline (colocate, no separate server) ---
-    echo "[bench] Starting GRPOTrainer baseline - colocate mode (run ${run})..."
-    CUDA_VISIBLE_DEVICES=0,1 "${VENV}/python" "${SCRIPT_DIR}/grpo_baseline.py" \
+    # --- Run 1: GRPO baseline (server mode, TRL vllm-serve on GPU 1) ---
+    launch_trl_vllm_serve
+    echo "[bench] Starting GRPOTrainer baseline - server mode (run ${run})..."
+    CUDA_VISIBLE_DEVICES=0 "${VENV}/python" "${SCRIPT_DIR}/grpo_baseline.py" \
         2>&1 | tee "${RESULTS_DIR}/grpo_baseline/run_${run}.log"
+    kill_server
     echo ""
 
-    # --- Run 2: AsyncGRPO (server mode) ---
-    # NOTE: vLLM launched without CUDA_VISIBLE_DEVICES (sees all GPUs, uses GPU 0).
-    # Trainer uses CUDA_VISIBLE_DEVICES=1 so HF Accelerator places model on GPU 1.
-    # NCCL resolves physical topology by bus ID across processes.
-    # NCCL_P2P_DISABLE + NCCL_SHM_DISABLE needed on both sides for PCIe-only hardware.
-    launch_vllm
+    # --- Run 2: AsyncGRPO (server mode, vLLM on GPU 0, trainer on GPU 1) ---
+    launch_vllm_server
     echo "[bench] Starting AsyncGRPOTrainer - server mode (run ${run})..."
-    NCCL_P2P_DISABLE=1 NCCL_SHM_DISABLE=1 CUDA_VISIBLE_DEVICES=1 "${VENV}/python" "${SCRIPT_DIR}/async_grpo_main.py" \
+    NCCL_P2P_DISABLE=1 NCCL_SHM_DISABLE=1 CUDA_VISIBLE_DEVICES=1 \
+        "${VENV}/python" "${SCRIPT_DIR}/async_grpo_main.py" \
         2>&1 | tee "${RESULTS_DIR}/async_grpo_main/run_${run}.log"
-    kill_vllm
+    kill_server
     echo ""
 done
 
