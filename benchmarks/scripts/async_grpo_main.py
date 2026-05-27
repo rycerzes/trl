@@ -83,14 +83,14 @@ def main():
         # Training
         per_device_train_batch_size=4,
         gradient_accumulation_steps=2,
-        max_steps=300,
+        max_steps=50,
         learning_rate=1e-5,
         warmup_ratio=0.03,
         gradient_checkpointing=True,
         bf16=True,
         # Saving & logging
         save_strategy="steps",
-        save_steps=100,
+        save_steps=50,
         logging_steps=5,
         log_completions=True,
         report_to="none",
