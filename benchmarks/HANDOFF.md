@@ -1,6 +1,6 @@
 # Benchmark Handoff — AsyncGRPO Gap-Closure Validation
 
-## Status: ✅ Smoke test passing (3 steps end-to-end with NCCL weight sync)
+## Status: ✅ Smoke tests passing (both trainers validated end-to-end)
 
 ---
 
@@ -16,8 +16,8 @@
 
 ### Validated Working ✅
 
-- **vLLM server** serves Qwen3-4B with all non-default sampling params (top_p, top_k, min_p, repetition_penalty)
-- **GRPO baseline** (colocate mode) runs end-to-end: 3 steps in 21s, metrics logged correctly
+- **TRL vllm-serve** on GPU 1 serves Qwen3-4B with all non-default sampling params (top_p, top_k, min_p, repetition_penalty)
+- **GRPO baseline** (server mode via TRL vllm-serve) runs end-to-end: 3 steps in 59.4s, metrics logged correctly
 - **AsyncGRPO trainer** runs end-to-end: 3 steps in 55.6s with weight sync (~8.7s per sync, 8GB over NCCL packed broadcast)
 - **NCCL handshake** between trainer and vLLM 0.21 works (warmup allreduce passes)
 - **HTTP API** for pause/resume/start_weight_update all return 200 OK
@@ -26,6 +26,14 @@
 
 ### Smoke Test Results
 
+**GRPO baseline (server mode):**
+```
+3 steps in 59.4s total (0.05 steps/s)
+Weight sync via /init_communicator/ + /update_named_param/ (TRL vllm-serve)
+Generation via /generate/ on GPU 1, training on GPU 0
+```
+
+**AsyncGRPO (server mode + NCCL):**
 ```
 weight_sync_time_s: 8.7s (avg per step)
 generation_tok_per_s: 32 → 55 (ramping up as buffer fills)
@@ -104,7 +112,24 @@ print(f'GPUs: {torch.cuda.device_count()}x {torch.cuda.get_device_name(0)}')
 "
 ```
 
-### Launch vLLM (correct pattern)
+### Launch TRL vllm-serve (for GRPO baseline)
+
+TRL's own vllm-serve provides `/generate/`, `/init_communicator/`, and `/update_named_param/` endpoints.
+Used by GRPOTrainer in server mode. Runs on GPU 1; trainer runs on GPU 0.
+
+```bash
+CUDA_VISIBLE_DEVICES=1 /root/trl/.venv/bin/trl vllm-serve \
+    --model Qwen/Qwen3-4B --dtype bfloat16 --max_model_len 768 \
+    --gpu_memory_utilization 0.90 --enforce_eager --port 8000
+```
+
+### GRPO Baseline Trainer
+
+```bash
+CUDA_VISIBLE_DEVICES=0 /root/trl/.venv/bin/python benchmarks/scripts/grpo_baseline.py
+```
+
+### Launch vLLM (for AsyncGRPO)
 
 **Do NOT use `CUDA_VISIBLE_DEVICES` to isolate vLLM.** The vLLM process must see all GPUs for correct NCCL topology detection. It defaults to GPU 0 with TP=1.
 
@@ -119,7 +144,7 @@ NCCL_P2P_DISABLE=1 NCCL_SHM_DISABLE=1 VLLM_SERVER_DEV_MODE=1 \
     --enforce-eager
 ```
 
-### Trainer
+### AsyncGRPO Trainer
 
 ```bash
 NCCL_P2P_DISABLE=1 NCCL_SHM_DISABLE=1 CUDA_VISIBLE_DEVICES=1 \
@@ -134,7 +159,7 @@ NCCL_P2P_DISABLE=1 NCCL_SHM_DISABLE=1 CUDA_VISIBLE_DEVICES=1 \
 |------|---------|
 | `benchmarks/async_grpo_gap_closure_benchmark.md` | Full benchmark plan |
 | `benchmarks/scripts/run_benchmark.sh` | Orchestrator script |
-| `benchmarks/scripts/grpo_baseline.py` | GRPO baseline (colocate mode) |
+| `benchmarks/scripts/grpo_baseline.py` | GRPO baseline (server mode via TRL vllm-serve) |
 | `benchmarks/scripts/async_grpo_main.py` | AsyncGRPO trainer (server mode) |
 | `trl/experimental/async_grpo/async_rollout_worker.py` | **PATCHED** — bugs 1-3 fixed |
 | `trl/experimental/async_grpo/async_grpo_trainer.py` | **PATCHED** — bug 4 fixed |
@@ -155,21 +180,49 @@ NCCL_P2P_DISABLE=1 NCCL_SHM_DISABLE=1 CUDA_VISIBLE_DEVICES=1 \
 
 vLLM's NCCL weight transfer allocates ~1GB receive buffers on the inference GPU. With `--gpu-memory-utilization 0.90`, the model + KV cache consume nearly all GPU memory, causing OOM during weight transfer. Use `0.45` (or lower) to leave headroom. On production hardware with more VRAM this is less of a concern.
 
-### GPU device placement for NCCL
+### GPU device placement
 
-The official vLLM pattern (from `rlhf_http_nccl.py`):
+**GRPO baseline (TRL vllm-serve):**
+- TRL vllm-serve: `CUDA_VISIBLE_DEVICES=1` (single GPU, no cross-process NCCL topology needed)
+- Trainer: `CUDA_VISIBLE_DEVICES=0`
+- Weight sync uses TRL's PyNcclCommunicator over `/init_communicator/` + `/update_named_param/`
+
+**AsyncGRPO (vLLM native NCCL):**
 - vLLM: launched **without** `CUDA_VISIBLE_DEVICES` (sees all GPUs, uses GPU 0)
-- Trainer: uses `cuda:{inference_world_size}` with all GPUs visible, OR uses `CUDA_VISIBLE_DEVICES=1` for HF Trainer compatibility
+- Trainer: `CUDA_VISIBLE_DEVICES=1` for HF Accelerator placement
+- Weight sync uses vLLM's `/init_weight_transfer_engine` + NCCL packed broadcast
 
 **Never use `CUDA_VISIBLE_DEVICES` for vLLM** when doing NCCL weight transfer. It confuses NCCL topology detection (per vLLM PR #26709).
 
-### GRPO baseline uses colocate mode (not server mode)
+### GRPO baseline uses server mode (TRL vllm-serve)
 
-GRPOTrainer's server-mode weight sync uses `/init_communicator/` which was removed in vLLM 0.21. Colocate mode avoids this — vLLM runs in-process on the same GPU, no HTTP weight sync needed.
+GRPOTrainer runs in server mode with TRL's own `trl vllm-serve` backend. This provides
+`/init_communicator/` and `/update_named_param/` endpoints for weight sync via TRL's
+PyNcclCommunicator — independent of vLLM's newer `/init_weight_transfer_engine` API.
+The TRL vllm-serve runs on GPU 1 (`CUDA_VISIBLE_DEVICES=1`), trainer on GPU 0.
 
-### Never `kill -9` a CUDA process in this container
+Note: vanilla `vllm serve` removed `/init_communicator/` in 0.21, but TRL's own server
+retains it. AsyncGRPO uses the newer vLLM-native NCCL weight transfer API instead.
 
-Use graceful termination or script-level timeouts. SIGKILL leaks GPU memory to PID 1 permanently.
+### Stopping GPU server processes safely
+
+**Never `kill -9` a CUDA process in this container.** SIGKILL leaks GPU memory to PID 1 permanently.
+
+**Even SIGTERM can leak** if sent only to the parent process. vLLM and TRL vllm-serve spawn child worker processes that hold the actual CUDA context. If the parent dies first, children become orphans reparented to PID 1 and may not clean up in time.
+
+**Correct shutdown pattern — kill the entire process group:**
+```bash
+# Launch with process group tracking:
+CUDA_VISIBLE_DEVICES=1 setsid /root/trl/.venv/bin/trl vllm-serve ... &
+SERVER_PID=$!
+
+# Shutdown — kill the whole process group:
+kill -- -$(ps -o pgid= -p $SERVER_PID | tr -d ' ') 2>/dev/null
+wait $SERVER_PID 2>/dev/null
+sleep 5  # allow CUDA context cleanup
+```
+
+Alternatively, use the orchestrator script (`run_benchmark.sh`) which handles this correctly via `setsid` + process group kill.
 
 ---
 

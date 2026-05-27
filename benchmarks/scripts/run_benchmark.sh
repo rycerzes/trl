@@ -13,6 +13,8 @@ VENV="/root/trl/.venv/bin"
 NUM_REPEATS="${NUM_REPEATS:-1}"
 
 # --- Helpers ---
+SERVER_PGID=""
+
 wait_for_server() {
     local health_url="$1"
     local timeout="${2:-240}"
@@ -29,11 +31,18 @@ wait_for_server() {
 }
 
 kill_server() {
-    # Kill any vllm or trl vllm-serve processes
+    # Kill the server's entire process group to avoid orphaning CUDA worker children.
+    # Orphaned CUDA workers leak GPU memory to PID 1 permanently in containers.
+    if [ -n "${SERVER_PGID}" ]; then
+        echo "[server] Stopping process group ${SERVER_PGID}..."
+        kill -- -"${SERVER_PGID}" 2>/dev/null || true
+        SERVER_PGID=""
+    fi
+    # Fallback: catch anything still lingering (SIGTERM only)
     pkill -f "vllm.entrypoints" 2>/dev/null || true
     pkill -f "trl vllm-serve" 2>/dev/null || true
     pkill -f "vllm_serve" 2>/dev/null || true
-    sleep 3
+    sleep 5  # allow CUDA context cleanup before next launch
 }
 
 launch_trl_vllm_serve() {
@@ -41,7 +50,7 @@ launch_trl_vllm_serve() {
     # Used by the GRPO baseline in server mode
     kill_server
     echo "[server] Launching TRL vllm-serve on GPU 1 (model: ${MODEL})..."
-    CUDA_VISIBLE_DEVICES=1 "${VENV}/trl" vllm-serve \
+    setsid env CUDA_VISIBLE_DEVICES=1 "${VENV}/trl" vllm-serve \
         --model "${MODEL}" \
         --dtype bfloat16 \
         --max_model_len 768 \
@@ -49,6 +58,7 @@ launch_trl_vllm_serve() {
         --enforce_eager \
         --port "${VLLM_PORT}" \
         > "${RESULTS_DIR}/trl_vllm_serve.log" 2>&1 &
+    SERVER_PGID=$(ps -o pgid= -p $! | tr -d ' ')
     wait_for_server "http://localhost:${VLLM_PORT}/health/"
 }
 
@@ -58,7 +68,7 @@ launch_vllm_server() {
     # vLLM defaults to GPU 0 with TP=1.
     kill_server
     echo "[server] Launching vLLM server on GPU 0 (model: ${MODEL})..."
-    NCCL_P2P_DISABLE=1 NCCL_SHM_DISABLE=1 VLLM_SERVER_DEV_MODE=1 \
+    setsid env NCCL_P2P_DISABLE=1 NCCL_SHM_DISABLE=1 VLLM_SERVER_DEV_MODE=1 \
         "${VENV}/python" -m vllm.entrypoints.openai.api_server \
         --model "${MODEL}" \
         --dtype bfloat16 \
@@ -69,6 +79,7 @@ launch_vllm_server() {
         --port "${VLLM_PORT}" \
         --enforce-eager \
         > "${RESULTS_DIR}/vllm_server.log" 2>&1 &
+    SERVER_PGID=$(ps -o pgid= -p $! | tr -d ' ')
     wait_for_server "http://localhost:${VLLM_PORT}/health"
 }
 
