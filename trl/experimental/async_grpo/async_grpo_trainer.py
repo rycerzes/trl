@@ -403,8 +403,11 @@ class AsyncGRPOTrainer(_BaseTrainer):
                 param_source = model.base_model.model if is_peft_model(model) else model
                 weight_names, weight_dtype_names, weight_shapes = [], [], []
                 for name, param in param_source.named_parameters():
-                    # DDP/FSDP1 wrapping, avoids vllm module not exist error
-                    name = name.removeprefix("module.")
+                    name = name.removeprefix("module.")  # DDP/FSDP1 wrapping
+                    if is_peft_model(model):
+                        name = name.replace(".base_layer", "")
+                        if model.prefix in name:
+                            continue
                     weight_names.append(name)
                     weight_dtype_names.append(str(param.dtype).split(".")[-1])
                     weight_shapes.append(list(param.shape))
@@ -624,6 +627,10 @@ class AsyncGRPOTrainer(_BaseTrainer):
         source = self.model.base_model.model if is_peft_model(self.model) else self.model
         for name, param in source.named_parameters():
             name = name.removeprefix("module.")  # DDP/FSDP1 wrapping
+            if is_peft_model(self.model):
+                name = name.replace(".base_layer", "")
+                if self.model.prefix in name:
+                    continue
             full = param.full_tensor() if isinstance(param, DTensor) else param.detach()
             if full.device != device:
                 full = full.to(device)
