@@ -54,7 +54,7 @@ launch_trl_vllm_serve() {
         --model "${MODEL}" \
         --dtype bfloat16 \
         --max_model_len 768 \
-        --gpu_memory_utilization 0.90 \
+        --gpu_memory_utilization 0.60 \
         --enforce_eager \
         --port "${VLLM_PORT}" \
         > "${RESULTS_DIR}/trl_vllm_serve.log" 2>&1 &
@@ -73,7 +73,7 @@ launch_vllm_server() {
         --model "${MODEL}" \
         --dtype bfloat16 \
         --max-model-len 768 \
-        --gpu-memory-utilization 0.45 \
+        --gpu-memory-utilization 0.60 \
         --logprobs-mode processed_logprobs \
         --weight-transfer-config '{"backend":"nccl"}' \
         --port "${VLLM_PORT}" \

@@ -17,7 +17,7 @@ AsyncGRPOTrainer benchmark (default async knobs).
 
 Launch vLLM server first (no CUDA_VISIBLE_DEVICES — sees all GPUs, uses GPU 0 by default):
     VLLM_SERVER_DEV_MODE=1 vllm serve Qwen/Qwen3-4B \
-        --dtype bfloat16 --max-model-len 768 --gpu-memory-utilization 0.90 \
+        --dtype bfloat16 --max-model-len 768 --gpu-memory-utilization 0.60 \
         --logprobs-mode processed_logprobs \
         --weight-transfer-config '{"backend":"nccl"}' --port 8000
 
@@ -61,6 +61,11 @@ def main():
 
     config = AsyncGRPOConfig(
         output_dir=OUTPUT_DIR,
+        # Model init kwargs (exercises model_init_kwargs pass-through)
+        model_init_kwargs={
+            "dtype": "bfloat16",
+            "attn_implementation": "flash_attention_2",
+        },
         # vLLM server
         vllm_server_base_url="http://localhost:8000",
         # Async defaults

@@ -23,7 +23,7 @@ The TRL vLLM server must be launched separately before running this script:
 
     CUDA_VISIBLE_DEVICES=1 /root/trl/.venv/bin/trl vllm-serve \
         --model Qwen/Qwen3-4B --dtype bfloat16 --max_model_len 768 \
-        --gpu_memory_utilization 0.90 --enforce_eager --port 8000
+        --gpu_memory_utilization 0.60 --enforce_eager --port 8000
 
 Run trainer:
     CUDA_VISIBLE_DEVICES=0 python benchmarks/scripts/grpo_baseline.py
