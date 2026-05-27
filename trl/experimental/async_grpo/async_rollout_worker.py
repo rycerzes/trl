@@ -43,6 +43,51 @@ if is_vllm_available(min_version="0.17.1"):
     from vllm.utils.network_utils import get_ip, get_open_port
 
 
+def _disable_nccl_p2p_if_unavailable() -> None:
+    """Disable NCCL P2P/SHM transports when GPUs lack NVLink interconnect
+
+    In environments without NVLink (e.g. PCIe-only or VMs with GPU passthrough),
+    NCCL's P2P and SHM transports can fail because they rely on CUDA IPC which
+    requires peer access. Disabling them forces NCCL to use socket-based transport.
+
+    Uses pynvml to check physical GPU topology, which works regardless of
+    CUDA_VISIBLE_DEVICES restrictions on the current process.
+    """
+    import os
+
+    if "NCCL_P2P_DISABLE" in os.environ and "NCCL_SHM_DISABLE" in os.environ:
+        return  # User has explicitly configured NCCL transports
+
+    try:
+        import pynvml
+
+        pynvml.nvmlInit()
+        try:
+            n = pynvml.nvmlDeviceGetCount()
+            if n < 2:
+                return
+            for i in range(n):
+                handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+                for link in range(18):
+                    try:
+                        if pynvml.nvmlDeviceGetNvLinkState(handle, link):
+                            return  # NVLink found, P2P should work
+                    except pynvml.NVMLError:
+                        break
+            # No NVLink detected — disable P2P/SHM to avoid broadcast hangs
+            os.environ.setdefault("NCCL_P2P_DISABLE", "1")
+            os.environ.setdefault("NCCL_SHM_DISABLE", "1")
+            logger.warning(
+                "No NVLink detected between GPUs. Disabling NCCL P2P and SHM transports to avoid "
+                "broadcast hangs on PCIe-only hardware. Override by setting NCCL_P2P_DISABLE=0 and "
+                "NCCL_SHM_DISABLE=0 explicitly."
+            )
+        finally:
+            pynvml.nvmlShutdown()
+    except (ImportError, Exception) as e:
+        logger.debug(f"Could not check NVLink topology (pynvml): {e}. NCCL P2P settings unchanged.")
+
+
 logger = get_logger(__name__)
 
 Messages: TypeAlias = list[dict[str, str]]
@@ -218,6 +263,7 @@ class AsyncRolloutWorker:
             time.sleep(poll_interval_s)
 
     def _init_weight_transfer(self) -> None:
+        _disable_nccl_p2p_if_unavailable()
         response = requests.get(f"{self.vllm_server_url}/get_world_size")
         inference_world_size = response.json()["world_size"]
         world_size = inference_world_size + 1
