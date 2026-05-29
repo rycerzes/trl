@@ -92,6 +92,9 @@ class _StubRolloutWorker:
     def send_weights(self, iterator):
         pass
 
+    def check_health(self, stale_after_s):
+        pass
+
 
 class TestAsyncGRPOTrainer(TrlTestCase):
     def test_init_minimal(self):
