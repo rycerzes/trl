@@ -354,7 +354,7 @@ class AsyncRolloutWorker:
 
     def _destroy_model_update_group(self) -> None:
         # It's important because otherwise we get errors on exit.
-        if self.model_update_group is None:
+        if self.model_update_gro    up is None:
             return  # happens if weight transfer was never initialized
         self.model_update_group.group.store = None
         self.model_update_group.group.socket = None
@@ -374,6 +374,12 @@ class AsyncRolloutWorker:
         if self.model_update_group is None:
             return
         t0 = time.time()
+        # Signal vLLM to prepare for weight update (required by vLLM >= 0.21).
+        requests.post(
+            f"{self.vllm_server_url}/start_weight_update",
+            json={"is_checkpoint_format": True},
+            timeout=60,
+        )
         t_update = threading.Thread(
             target=requests.post,
             args=(f"{self.vllm_server_url}/update_weights",),
@@ -392,6 +398,8 @@ class AsyncRolloutWorker:
         logger.debug(
             f"[weight_sync] /update_weights join took {time.time() - t_join:.1f}s (total send_weights: {time.time() - t0:.1f}s)"
         )
+        # Signal vLLM that the weight update is complete (required by vLLM >= 0.21).
+        requests.post(f"{self.vllm_server_url}/finish_weight_update", timeout=60)
 
     async def _generate_loop(self, stop_event: asyncio.Event) -> None:
         pending_groups: dict[int, RolloutGroup] = {}
