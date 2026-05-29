@@ -362,6 +362,9 @@ class VLLMGeneration:
                 # Important so temperature scaling/logit tweaking affects the TIS log probs
                 logprobs_mode="processed_logprobs",
                 quantization=quantization,
+                # CUDA graphs hold memory references that the cumem allocator frees during sleep(),
+                # causing illegal memory access on wake. Disable graphs when sleep mode is active.
+                enforce_eager=self.enable_sleep_mode,
             )
             if self.enable_sleep_mode:
                 self.llm.sleep(level=2)
